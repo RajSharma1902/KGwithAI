@@ -4,13 +4,14 @@ from dotenv import load_dotenv
 from mistralai import Mistral
 from neo4j import GraphDatabase
 from pyvis.network import Network
+from rapidfuzz import fuzz,process
 
 load_dotenv()
 
 # Initialize the Mistral client
 client = Mistral(api_key=os.getenv("MISTRAL_API"))
 model = "mistral-large-latest"
-with open('mistral/prompts.txt', 'r') as file:
+with open('/Users/rajnarayansharma/Desktop/Raj_924/RajNarayan_924/prompts.txt', 'r') as file:
     answerGen = file.read()
 
 # Load the CSV-like dataset as a graph
@@ -31,13 +32,22 @@ def load_and_create_graph(file_path):
     return graph
 
 # Retrieve relevant data from the graph based on the user query
+
+# Retrieve relevant data from the graph based on the user query
 def retrieve_relevant_chunks(query, graph):
     relevant_chunks = []
-    for entity in graph:
-        if entity.lower() in query.lower():
-            for relation, related_entity in graph[entity]:
-                relevant_chunks.append(f"{entity} {relation} {related_entity}")
+    all_entities = list(graph.keys())
+    
+    # Use fuzzy matching to find the best match for entities in the query
+    for word in query.split():
+        best_match = process.extractOne(word, all_entities, scorer=fuzz.ratio)
+        if best_match and best_match[1] > 50:  # Threshold for matching accuracy
+            matched_entity = best_match[0]
+            for relation, related_entity in graph[matched_entity]:
+                relevant_chunks.append(f"{matched_entity} {relation} {related_entity}")
+    
     return relevant_chunks
+
 
 # Build the prompt using relevant context
 def build_prompt(relevant_context):
@@ -85,7 +95,7 @@ def save_interactive_graph_with_pyvis(data):
         net.add_edge(node1, node2, label=relation)
 
     # Save the network as an interactive HTML file
-    output_dir = "webCreate/genImg"
+    output_dir = "/Users/rajnarayansharma/Desktop/Raj_924/RajNarayan_924/Accuracy"
     os.makedirs(output_dir, exist_ok=True)
     
     # Create a unique file name for each graph
@@ -95,20 +105,23 @@ def save_interactive_graph_with_pyvis(data):
     net.show(graph_filename)
     print(f"Interactive graph saved as {graph_filename}")
 
-# Load the graph
-graph = load_and_create_graph('mistral/agri.txt')
+# Load the graph once (outside the loop)
+graph = load_and_create_graph('/Users/rajnarayansharma/Desktop/Raj_924/RajNarayan_924/fullAgri.txt')
 
-# Ask the user for a question
-question = input("What is your question? ")
-
-# Retrieve relevant data from the graph based on the user's question (RAG retrieval)
-relevant_context = retrieve_relevant_chunks(question, graph)
-
-# Build the prompt using the relevant context from the graph
-prompt = build_prompt(relevant_context)
-prompt += f"\nNow, if I ask the question: {question}\n"
-
+# Question-answer loop
 while True:
+    question = input("What is your question? (Type 'exit' to quit): ")
+    if question.lower() == 'exit':
+        print("Exiting the program.")
+        break
+
+    # Retrieve relevant data from the graph based on the user's question (RAG retrieval)
+    relevant_context = retrieve_relevant_chunks(question, graph)
+    print("Relevant Chunks Extracted : ",relevant_context)
+    # Build the prompt using the relevant context from the graph
+    prompt = build_prompt(relevant_context)
+    prompt += f"\nNow, if I ask the question: {question}\n"
+
     try:
         # Make the API call to Mistral
         chat_response = client.chat.complete(
@@ -120,7 +133,7 @@ while True:
                 },
             ],
             temperature=1,
-            max_tokens=1024,
+            max_tokens=4096,
             top_p=1,
             stream=False
         )
@@ -131,12 +144,17 @@ while True:
         
         # Extract Cypher query from the response
         cypher_query_start = "MATCH"
-        cypher_query_end = "n,r,m"
-        if cypher_query_start in answer and cypher_query_end in answer:
-            start_idx = answer.index(cypher_query_start)
-            end_idx = answer.index(cypher_query_end) + len(cypher_query_end)
-            cypher_query = answer[start_idx:end_idx].strip()
-            print(f"Cypher Query: {cypher_query}")
+        cypher_query_end_variants = ["n,r,m", "n, r, m"]
+
+        # Check if any of the variants of cypher_query_end are present in answer
+        if cypher_query_start in answer:
+            for cypher_query_end in cypher_query_end_variants:
+                if cypher_query_end in answer:
+                    start_idx = answer.index(cypher_query_start)
+                    end_idx = answer.index(cypher_query_end) + len(cypher_query_end)
+                    cypher_query = answer[start_idx:end_idx].strip()
+                    print(f"Cypher Query: {cypher_query}")
+                    break  # Stop checking once we find a match
             
             # Execute the Cypher query on Neo4j and get the result
             result_data = execute_cypher_query(cypher_query)
@@ -146,8 +164,6 @@ while True:
             save_interactive_graph_with_pyvis(result_data)
         else:
             print("No Cypher query found in the response.")
-        
-        break
 
     except Exception as e:
         if "Rate limit reached" in str(e):
@@ -155,4 +171,3 @@ while True:
             time.sleep(40)  # Wait for 40 seconds before retrying
         else:
             print(f"An error occurred: {e}")
-            break
